@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR Text Extractor</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>OCR Text Extractor</h1>
+        
+        <input type="file" id="imageInput" accept="image/*">
+        
+        <div id="loading">Processing... Please wait.</div>
+
+        <div class="images-flex-container">
+            <div class="image-container">
+                <h2>Original Image:</h2>
+                <div class="image-wrapper">
+                    <img id="preview" alt="Preview">
+                </div>
+            </div>
+
+            <div class="image-container">
+                <h2>Processed Image:</h2>
+                <div class="image-wrapper">
+                    <img id="ocrImage" alt="OCR Result">
+                </div>
+            </div>
+        </div>
+
+        <div class="button-container">
+            <button id="ocrButton" disabled>Process Image</button>
+        </div>
+
+        <div id="ocrText">
+            <h2>Extracted Text:</h2>
+            <div id="textResults"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script src="/static/js/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "ml-api"
+version = "0.1.0"
+description = "An OCR Text Extractor"
+authors = ["Abdulla Kayyani"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+paddlepaddle = "^2.6.2"
+paddleocr = "^2.9.1"
+transformers = "^4.46.1"
+opencv-python = "^4.10.0.84"
+numpy = "<2.0"
+fastapi = "^0.115.4"
+torch = "^2.5.1"
+uvicorn = "^0.32.0"
+torchvision = "^0.20.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
