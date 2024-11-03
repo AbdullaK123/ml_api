@@ -1,7 +1,7 @@
-# Use Ubuntu as base image
-FROM ubuntu:22.04
+# Build stage
+FROM ubuntu:22.04 AS builder
 
-# Prevent timezone prompts during package installation
+# Prevent timezone prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Set environment variables
@@ -13,67 +13,110 @@ ENV PYTHONUNBUFFERED=1 \
     POETRY_HOME="/opt/poetry" \
     POETRY_VIRTUALENVS_IN_PROJECT=true \
     POETRY_NO_INTERACTION=1 \
-    PATH="$POETRY_HOME/bin:$PATH" \
-    APP_HOME="/app"
+    POETRY_INSTALLER_MAX_WORKERS=10 \
+    PYTHON_VERSION=3.10
 
-# Set working directory
-WORKDIR $APP_HOME
+WORKDIR /app
 
-# Install system dependencies and Python
+# Install Python and build dependencies
 RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-dev \
-    python3.10-distutils \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-distutils \
     python3-pip \
-    build-essential \
     curl \
+    build-essential \
+    libpq-dev \
     git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.10 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
+
+# Upgrade pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3 \
+    && python3 -m pip install --upgrade pip
+
+# Install Poetry
+RUN curl -sSL https://install.python-poetry.org | python3 - \
+    && ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock README.rst ./
+
+# Install dependencies
+RUN poetry config installer.max-workers 10 && \
+    poetry config installer.parallel false && \
+    poetry install --only main --no-interaction --no-ansi
+
+# Copy application files
+COPY ml_api/ ./ml_api/
+COPY static/ ./static/
+COPY templates/ ./templates/
+COPY startup.sh ./
+
+# Runtime stage
+FROM ubuntu:22.04
+
+# Prevent timezone prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set runtime environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8000 \
+    HOST=0.0.0.0 \
+    WORKERS=1 \
+    TIMEOUT=120 \
+    MAX_REQUESTS=100 \
+    KEEP_ALIVE=5 \
+    MODEL_CACHE_DIR=/app/model_cache \
+    PYTHON_VERSION=3.10
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-distutils \
     libpq-dev \
     libopencv-dev \
     python3-opencv \
     ffmpeg \
     libsm6 \
     libxext6 \
-    wget \
+    curl \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Ensure python3 and pip3 point to Python 3.10
-RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
-    && update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+# Set Python 3.10 as default
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1
 
-# Upgrade pip
-RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 \
-    && python3.10 -m pip install --upgrade pip
+# Copy Python dependencies and application from builder
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/ml_api /app/ml_api
+COPY --from=builder /app/static /app/static
+COPY --from=builder /app/templates /app/templates
+COPY --from=builder /app/startup.sh /app/startup.sh
 
-# Install Poetry
-RUN curl -sSL https://install.python-poetry.org | python3 - \
-    && ln -s /opt/poetry/bin/poetry /usr/local/bin/poetry
+ENV PATH="/app/.venv/bin:$PATH"
 
-# Copy poetry files
-COPY pyproject.toml poetry.lock ./
+# Create and set permissions for directories
+RUN mkdir -p /app/model_cache && \
+    chmod -R 755 /app/static /app/templates && \
+    chmod 777 /app/model_cache && \
+    chmod +x /app/startup.sh
 
-# Install dependencies
-RUN poetry install --no-root --no-dev
-
-# Create cache directory for models
-RUN mkdir -p /app/model_cache \
-    && chmod 777 /app/model_cache
-
-# Copy the rest of the application
-COPY . .
-
-# Create necessary directories with proper permissions
-RUN mkdir -p /app/static /app/templates \
-    && chmod -R 755 /app/static /app/templates
-
-# Set up model cache directory
-ENV MODEL_CACHE_DIR=/app/model_cache
+# Create .dockerignore
+RUN echo "**/__pycache__\n*.pyc\n*.pyo\n*.pyd\n.Python\n*.log\n.git\n.pytest_cache" > .dockerignore
 
 # Expose port
 EXPOSE 8000
 
 # Run the application
-CMD ["poetry", "run", "uvicorn", "ml_api.inference_api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/startup.sh"]
 
 # Add healthcheck
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \

@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from ml_api.model_manager import model_manager
 import sys
+import uvicorn
+import gc
 
 # Set up logging
 logging.basicConfig(
@@ -50,10 +52,11 @@ except Exception as e:
 
 
 # Constants
-MAX_IMAGE_SIZE = 1500  # Reduced from 2000 to improve processing speed
-MAX_FILE_SIZE = 5 * 1024 * 1024  # Reduced to 5MB
-MIN_IMAGE_SIZE = 300  # Don't process images smaller than this
-JPEG_QUALITY = 85  # JPEG compression quality
+MAX_IMAGE_SIZE = 1280  # Reduced for better memory usage
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB limit
+MIN_IMAGE_SIZE = 300
+JPEG_QUALITY = 85
+BATCH_SIZE = 1  # Process one image at a time
 
 
 def optimize_image_for_ocr(image: np.ndarray) -> np.ndarray:
@@ -76,31 +79,36 @@ def optimize_image_for_ocr(image: np.ndarray) -> np.ndarray:
     return denoised
 
 def smart_resize(image, target_size=MAX_IMAGE_SIZE):
-    """Resize image while maintaining aspect ratio and quality"""
-    if isinstance(image, np.ndarray):
-        height, width = image.shape[:2]
-    else:
-        width, height = image.size
-        
-    # Don't upscale small images
-    if width <= MIN_IMAGE_SIZE and height <= MIN_IMAGE_SIZE:
-        return image
-        
-    if width > target_size or height > target_size:
-        aspect_ratio = width / height
-        if width > height:
-            new_width = target_size
-            new_height = int(target_size / aspect_ratio)
-        else:
-            new_height = target_size
-            new_width = int(target_size * aspect_ratio)
-            
+    """Memory-efficient image resizing"""
+    try:
         if isinstance(image, np.ndarray):
-            return cv2.resize(image, (new_width, new_height), 
-                            interpolation=cv2.INTER_AREA)
+            height, width = image.shape[:2]
         else:
-            return image.resize((new_width, new_height), Image.LANCZOS)
-    return image
+            width, height = image.size
+            
+        if width <= MIN_IMAGE_SIZE and height <= MIN_IMAGE_SIZE:
+            return image
+            
+        if width > target_size or height > target_size:
+            scale = target_size / max(width, height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            
+            if isinstance(image, np.ndarray):
+                resized = cv2.resize(image, (new_width, new_height), 
+                                interpolation=cv2.INTER_AREA)
+                ImageProcessor.cleanup_resources(image)
+                return resized
+            else:
+                resized = image.resize((new_width, new_height), Image.LANCZOS)
+                image.close()  # Close original PIL Image
+                return resized
+        return image
+    except Exception as e:
+        logger.error(f"Resize failed: {e}")
+        raise
+    finally:
+        gc.collect()
 
 def validate_image(img_data: str) -> bool:
     """Validate image data"""
@@ -298,6 +306,70 @@ def apply_ocr_results(image, lines, box_coords):
         cv2.rectangle(image, (int(x1[0]), int(y1[1])), (int(x2[0]), int(y2[1])), (0, 255, 0), 2)
     return image
 
+class ImageProcessor:
+    @staticmethod
+    def cleanup_resources(*arrays):
+        """Clean up numpy arrays"""
+        for arr in arrays:
+            if arr is not None:
+                del arr
+        gc.collect()
+
+    @staticmethod
+    def decode_and_resize_image(img_data: str) -> np.ndarray:
+        """Decode base64 and resize image with memory cleanup"""
+        try:
+            decoded_data = base64.b64decode(img_data)
+            nparr = np.frombuffer(decoded_data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if img is None:
+                raise ValueError("Could not decode image")
+            
+            # Resize if needed
+            resized = smart_resize(img)
+            ImageProcessor.cleanup_resources(img)
+            
+            return resized
+        finally:
+            ImageProcessor.cleanup_resources(decoded_data, nparr)
+            gc.collect()
+
+    @staticmethod
+    def process_image_for_ocr(image: np.ndarray) -> np.ndarray:
+        """Process image for OCR with memory management"""
+        try:
+            # Convert to RGB
+            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            ImageProcessor.cleanup_resources(image)
+            
+            # Convert to PIL for background removal
+            pil_img = Image.fromarray(image_rgb)
+            ImageProcessor.cleanup_resources(image_rgb)
+            
+            # Remove background
+            no_background = model_manager.get_background_remover()(pil_img)
+            ImageProcessor.cleanup_resources(pil_img)
+            
+            # Convert result to numpy array
+            processed = np.array(no_background['map'] if isinstance(no_background, dict) else no_background)
+            ImageProcessor.cleanup_resources(no_background)
+            
+            # Apply perspective transform
+            transformed = perspective_transform(processed)
+            ImageProcessor.cleanup_resources(processed)
+            
+            # Optimize for OCR
+            optimized = optimize_image_for_ocr(transformed)
+            ImageProcessor.cleanup_resources(transformed)
+            
+            return optimized
+        except Exception as e:
+            logger.error(f"Image processing failed: {e}")
+            raise
+        finally:
+            gc.collect()
+
 
 # set up paths
 current_file = Path(__file__).resolve()
@@ -342,58 +414,55 @@ async def root(request: Request):
 # route that takes in an image from the client, preprocesses it, and then returns the image with the ocr results
 @app.post("/ocr")
 async def ocr(img: dict):
-    """OCR endpoint that returns both processed image and text"""
+    """OCR endpoint with memory optimization"""
     logger.debug("OCR endpoint called")
     
+    image = None
+    processed_image = None
+    result_image = None
+    
     try:
-        # Basic validation
         if not img or "img" not in img:
             raise HTTPException(status_code=400, detail="No image data provided")
         
-        # Validate image
         validate_image(img["img"])
         
         try:
-            # Decode and prepare image
-            decoded_data = base64.b64decode(img["img"])
-            nparr = np.frombuffer(decoded_data, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            if image is None:
-                raise HTTPException(status_code=400, detail="Could not decode image")
-            
-            # Optimize image size
-            image = smart_resize(image)
-            
-            # Convert to RGB and optimize for OCR
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            optimized_image = optimize_image_for_ocr(image_rgb)
+            # Process image in stages with memory cleanup
+            image = ImageProcessor.decode_and_resize_image(img["img"])
+            processed_image = ImageProcessor.process_image_for_ocr(image)
+            ImageProcessor.cleanup_resources(image)
+            image = None
             
             # Perform OCR
-            ocr_result = ocr_model.ocr(optimized_image, cls=True)
+            ocr_result = model_manager.get_ocr_model().ocr(
+                processed_image, 
+                cls=True
+            )
             
             if not ocr_result or not ocr_result[0]:
                 return {"img": "", "text": ["No text found"]}
             
-            # Draw results on original image
-            result_image = image.copy()
+            # Draw results
+            result_image = processed_image.copy()
             text_lines = []
             
             for line in ocr_result[0]:
-                # Extract text and coordinates
                 text = line[1][0]
                 points = np.array(line[0]).astype(np.int32).reshape((-1, 1, 2))
-                
-                # Draw bounding box
                 cv2.polylines(result_image, [points], True, (0, 255, 0), 2)
-                
-                # Add text to results
                 text_lines.append(text)
-                
-            # Compress result image
+            
+            # Encode result
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
             _, buffer = cv2.imencode('.jpg', result_image, encode_param)
             img_str = base64.b64encode(buffer).decode()
+            
+            ImageProcessor.cleanup_resources(buffer)
+            
+            # Force cleanup
+            model_manager.cleanup()
+            gc.collect()
             
             return {
                 "img": img_str,
@@ -409,3 +478,23 @@ async def ocr(img: dict):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Clean up all resources
+        ImageProcessor.cleanup_resources(image, processed_image, result_image)
+        gc.collect()
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        workers=1,
+        timeout_keep_alive=5,
+        timeout=120,
+        limit_concurrency=20,
+        backlog=100
+    )
