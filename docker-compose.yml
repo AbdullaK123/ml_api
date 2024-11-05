@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+      cache_from:
+        - abdullak123/ml-api:latest
+    image: abdullak123/ml-api:latest
+    environment:
+      - PORT=8000
+      - WORKERS=2
+      - TIMEOUT=120
+      - MAX_REQUESTS=250
+      - KEEP_ALIVE=30
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G

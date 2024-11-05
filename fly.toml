@@ -1,32 +1,85 @@
 app = "ocr-extractor-app"
 primary_region = "lax"
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[experimental]
+  auto_rollback = true
+  enable_consul = true
 
 [build]
   image = "abdullak123/ml-api:latest"
+
+[deploy]
+  strategy = "rolling"
 
 [env]
   PORT = "8000"
   HOST = "0.0.0.0"
   PYTHONUNBUFFERED = "1"
+  PYTHONDONTWRITEBYTECODE = "1"
+  PYTORCH_CUDA_ALLOC_CONF = "max_split_size_mb:1024"
+  MALLOC_TRIM_THRESHOLD_ = "100000"
+  OMP_NUM_THREADS = "4"
+  MKL_NUM_THREADS = "4"
+  NUMEXPR_NUM_THREADS = "4"
   WORKERS = "4"
   TIMEOUT = "300"
   MAX_REQUESTS = "1000"
+  MAX_REQUESTS_JITTER = "50"
   KEEP_ALIVE = "75"
+  GRACEFUL_TIMEOUT = "60"
+  MODEL_CACHE_DIR = "/app/model_cache"
+  MEMORY_MONITOR_THRESHOLD = "7000"
+  MODEL_TIMEOUT = "600"
+  PADDLEOCR_HOME = "/app/model_cache/paddleocr"
+  HF_HOME = "/app/model_cache/huggingface"
 
 [http_service]
   internal_port = 8000
   force_https = true
-  auto_stop_machines = true
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
-  
+
   [http_service.concurrency]
     type = "connections"
     hard_limit = 50
-    soft_limit = 40
+    soft_limit = 35
 
-[[vm]]
-  cpu_kind = "shared"
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "10s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health"
+    protocol = "http"
+    tls_skip_verify = false
+
+    [http_service.checks.headers]
+      User-Agent = "fly/healthcheck"
+
+[[metrics]]
+  port = 9091
+  path = "/metrics"
+
+[vm]
+  memory = "8192"
+  cpu_kind = "performance"
   cpus = 4
-  memory_mb = 4096
+  swap_size_mb = 4096
+
+  [vm.gc]
+    enabled = true
+    total_memory_ratio = 0.8
+    free_memory_ratio = 0.3
+    gc_period = "45s"
+  
+  [vm.agent]
+    enabled = true
+    statsd_address = "localhost:8125"
+
+[mounts]
+  source="model_cache"
+  destination="/app/model_cache"

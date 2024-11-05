@@ -414,12 +414,8 @@ async def root(request: Request):
 # route that takes in an image from the client, preprocesses it, and then returns the image with the ocr results
 @app.post("/ocr")
 async def ocr(img: dict):
-    """OCR endpoint with memory optimization"""
+    """OCR endpoint with improved memory management"""
     logger.debug("OCR endpoint called")
-    
-    image = None
-    processed_image = None
-    result_image = None
     
     try:
         if not img or "img" not in img:
@@ -427,51 +423,49 @@ async def ocr(img: dict):
         
         validate_image(img["img"])
         
-        try:
-            # Process image in stages with memory cleanup
+        # Use context managers for models
+        with model_manager.model_context('background_remover') as bg_remover, \
+             model_manager.model_context('ocr') as ocr_model:
+            
+            # Process image in smaller chunks with memory cleanup
             image = ImageProcessor.decode_and_resize_image(img["img"])
             processed_image = ImageProcessor.process_image_for_ocr(image)
             ImageProcessor.cleanup_resources(image)
-            image = None
             
-            # Perform OCR
-            ocr_result = model_manager.get_ocr_model().ocr(
-                processed_image, 
-                cls=True
-            )
+            # Perform OCR with batch processing
+            ocr_result = ocr_model.ocr(processed_image, cls=True)
             
             if not ocr_result or not ocr_result[0]:
                 return {"img": "", "text": ["No text found"]}
             
-            # Draw results
+            # Process results efficiently
             result_image = processed_image.copy()
             text_lines = []
             
+            # Batch process OCR results
+            points_batch = []
             for line in ocr_result[0]:
-                text = line[1][0]
+                text_lines.append(line[1][0])
                 points = np.array(line[0]).astype(np.int32).reshape((-1, 1, 2))
-                cv2.polylines(result_image, [points], True, (0, 255, 0), 2)
-                text_lines.append(text)
+                points_batch.append(points)
             
-            # Encode result
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
+            # Draw all boxes at once
+            cv2.polylines(result_image, points_batch, True, (0, 255, 0), 2)
+            
+            # Optimize image encoding
+            encode_param = [
+                int(cv2.IMWRITE_JPEG_QUALITY), 85,
+                int(cv2.IMWRITE_JPEG_OPTIMIZE), 1
+            ]
             _, buffer = cv2.imencode('.jpg', result_image, encode_param)
             img_str = base64.b64encode(buffer).decode()
             
-            ImageProcessor.cleanup_resources(buffer)
-            
-            # Force cleanup
-            model_manager.cleanup()
-            gc.collect()
+            ImageProcessor.cleanup_resources(buffer, result_image, processed_image)
             
             return {
                 "img": img_str,
                 "text": text_lines
             }
-            
-        except Exception as e:
-            logger.error(f"Image processing failed: {str(e)}")
-            raise HTTPException(status_code=500, detail="Image processing failed")
             
     except Exception as e:
         logger.error(f"OCR processing error: {str(e)}")
@@ -479,8 +473,6 @@ async def ocr(img: dict):
             raise e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up all resources
-        ImageProcessor.cleanup_resources(image, processed_image, result_image)
         gc.collect()
 
 @app.get("/health")
